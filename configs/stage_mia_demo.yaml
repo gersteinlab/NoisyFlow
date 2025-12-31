@@ -1,0 +1,138 @@
+seed: 2
+device: cuda
+
+data:
+  type: federated_mixture_gaussians
+  params:
+    K: 2
+    n_per_client: 200
+    n_target_ref: 200
+    n_target_test: 200
+    d: 2
+    num_classes: 3
+    component_scale: 2.0
+    component_cov: 0.3
+    seed: 2
+
+loaders:
+  batch_size: 32
+  target_batch_size: 32
+  test_batch_size: 32
+  synth_batch_size: 32
+  drop_last: true
+
+stage1:
+  epochs: 2
+  lr: 0.001
+  hidden: [64, 64]
+  time_emb_dim: 16
+  label_emb_dim: 16
+  label_prior:
+    enabled: false
+    mechanism: gaussian
+    sigma: 1.0
+  dp:
+    enabled: false
+    max_grad_norm: 1.0
+    noise_multiplier: 1.0
+    delta: 1e-5
+
+stage2:
+  option: A
+  epochs: 2
+  lr: 0.001
+  hidden: [64, 64]
+  act: relu
+  add_strong_convexity: 0.1
+  flow_steps: 20
+  conj_steps: 5
+  conj_lr: 0.1
+  conj_clamp: 5.0
+  dp:
+    enabled: false
+    max_grad_norm: 1.0
+    noise_multiplier: 1.0
+    delta: 1e-5
+  cellot:
+    enabled: true
+    hidden_units: [64, 64, 64, 64]
+    activation: LeakyReLU
+    softplus_W_kernels: false
+    softplus_beta: 1.0
+    kernel_init:
+      name: uniform
+      b: 0.1
+    optim:
+      optimizer: Adam
+      lr: 0.0001
+      beta1: 0.5
+      beta2: 0.9
+      weight_decay: 0.0
+    f_fnorm_penalty: 0.0
+    g_fnorm_penalty: 1.0
+    n_inner_iters: 5
+    n_iters: null
+
+stage3:
+  epochs: 2
+  lr: 0.001
+  hidden: [64, 64]
+  flow_steps: 20
+  M_per_client: 500
+
+privacy_curve:
+  enabled: false
+  stage: stage1
+  noise_multipliers: [0.5, 1.0, 2.0, 4.0]
+  output_path: privacy_utility.png
+
+membership_inference:
+  enabled: false
+  max_samples: 2000
+  seed: 0
+
+shadow_mia:
+  enabled: false
+  num_shadow_models: 2
+  shadow_train_size: 2000
+  shadow_test_size: 2000
+  shadow_epochs: 5
+  shadow_lr: 0.001
+  shadow_hidden: [128, 128]
+  shadow_batch_size: 256
+  attack_epochs: 20
+  attack_lr: 0.001
+  attack_hidden: [64, 32]
+  attack_batch_size: 256
+  feature_set: stats
+  max_samples_per_shadow: 2000
+  seed: 0
+  data_overrides: {}
+
+stage_mia:
+  enabled: true
+  holdout_fraction: 0.3
+  num_flow_samples: 1
+  include_ot_transport_norm: true
+  attack_train_frac: 0.5
+  attack_hidden: [32, 16]
+  attack_epochs: 5
+  attack_lr: 0.001
+  attack_batch_size: 64
+  max_samples: 500
+  seed: 0
+
+stage_shadow_mia:
+  enabled: false
+  num_shadow_models: 2
+  holdout_fraction: 0.2
+  num_flow_samples: 1
+  include_ot_transport_norm: true
+  attack_train_frac: 0.5
+  attack_hidden: [64, 32]
+  attack_epochs: 20
+  attack_lr: 0.001
+  attack_batch_size: 256
+  max_samples_per_shadow: 2000
+  seed: 0
+  data_overrides: {}

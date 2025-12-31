@@ -1,0 +1,7 @@
+numpy
+torch
+pyyaml
+opacus
+
+# Optional (only needed for privacy curve plots)
+# matplotlib
