@@ -22,7 +22,7 @@ from noisyflow.stage1.training import sample_flow_euler, train_flow_stage1
 from noisyflow.stage2.networks import CellOTICNN, ICNN, RectifiedFlowOT
 from noisyflow.stage2.training import train_ot_stage2, train_ot_stage2_cellot, train_ot_stage2_rectified_flow
 from noisyflow.stage3.networks import Classifier
-from noisyflow.stage3.training import server_synthesize, train_classifier
+from noisyflow.stage3.training import server_synthesize, train_classifier, train_random_forest_classifier
 from noisyflow.utils import DPConfig, dp_label_prior_from_counts, set_seed, unwrap_model
 
 
@@ -85,6 +85,45 @@ def _split_dataset(ds: TensorDataset, holdout_fraction: float, seed: int) -> Tup
     train_tensors = [t[train_idx] for t in ds.tensors]
     hold_tensors = [t[hold_idx] for t in ds.tensors]
     return TensorDataset(*train_tensors), TensorDataset(*hold_tensors)
+
+
+def _subsample_labeled_dataset(
+    ds: TensorDataset,
+    n: Optional[int],
+    num_classes: int,
+    seed: int,
+) -> TensorDataset:
+    if n is None:
+        return ds
+    n = int(n)
+    if n <= 0:
+        raise ValueError("ref_train_size must be > 0")
+    if n >= len(ds):
+        return ds
+    labels = ds.tensors[1].long().cpu().numpy()
+    rng = np.random.default_rng(seed)
+
+    per_class = max(1, n // max(1, num_classes))
+    indices: List[int] = []
+    for c in range(num_classes):
+        idx_c = np.flatnonzero(labels == c)
+        if idx_c.size == 0:
+            continue
+        rng.shuffle(idx_c)
+        indices.extend(idx_c[: min(per_class, idx_c.size)].tolist())
+
+    if len(indices) < n:
+        all_idx = np.arange(labels.shape[0])
+        mask = np.ones(labels.shape[0], dtype=bool)
+        mask[np.array(indices, dtype=np.int64)] = False
+        remaining = all_idx[mask]
+        rng.shuffle(remaining)
+        indices.extend(remaining[: (n - len(indices))].tolist())
+
+    idx = np.array(indices[:n], dtype=np.int64)
+    rng.shuffle(idx)
+    tensors = [t[idx] for t in ds.tensors]
+    return TensorDataset(*tensors)
 
 
 def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
@@ -171,7 +210,7 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
             raise ValueError("Choose only one Stage2 model: stage2.cellot.enabled or stage2.rectified_flow.enabled.")
 
         real_x_loader = DataLoader(
-            TensorDataset(train_ds.tensors[0]),
+            train_ds,
             batch_size=cfg.loaders.batch_size,
             shuffle=True,
             drop_last=cfg.loaders.drop_last,
@@ -227,6 +266,7 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
                 source_loader=real_x_loader if cfg.stage2.option.upper() == "A" else None,
                 target_loader=target_loader,
                 option=cfg.stage2.option,
+                pair_by_label=cfg.stage2.pair_by_label,
                 synth_sampler=(lambda bs: synth_sampler(bs)) if cfg.stage2.option.upper() == "B" else None,
                 epochs=cfg.stage2.epochs,
                 lr=cfg.stage2.lr,
@@ -290,16 +330,37 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
         drop_last=False,
     )
 
-    clf = Classifier(d=d, num_classes=num_classes, hidden=cfg.stage3.hidden)
-    stats = train_classifier(
-        clf,
-        syn_loader,
-        test_loader=target_test_loader,
-        epochs=cfg.stage3.epochs,
-        lr=cfg.stage3.lr,
-        device=device,
-    )
+    clf = None
+    try:
+        stats = train_random_forest_classifier(
+            syn_loader,
+            test_loader=target_test_loader,
+            seed=cfg.seed,
+            name="Classifier/RF-synth",
+        )
+    except RuntimeError as exc:
+        print(f"[Classifier/RF] WARNING: {exc} Falling back to MLP classifier.")
+        clf = Classifier(d=d, num_classes=num_classes, hidden=cfg.stage3.hidden)
+        stats = train_classifier(
+            clf,
+            syn_loader,
+            test_loader=target_test_loader,
+            epochs=cfg.stage3.epochs,
+            lr=cfg.stage3.lr,
+            device=device,
+        )
     out: Dict[str, float] = dict(stats)
+
+    if (cfg.membership_inference.enabled or cfg.shadow_mia.enabled) and clf is None:
+        clf = Classifier(d=d, num_classes=num_classes, hidden=cfg.stage3.hidden)
+        train_classifier(
+            clf,
+            syn_loader,
+            test_loader=None,
+            epochs=cfg.stage3.epochs,
+            lr=cfg.stage3.lr,
+            device=device,
+        )
     if cfg.stage_mia.enabled:
         use_ot = cfg.stage2.option.upper() in {"A", "C"}
         member_feats: List[torch.Tensor] = []
@@ -426,6 +487,8 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
         )
         out.update(stage_shadow_stats)
     if cfg.membership_inference.enabled:
+        if clf is None:
+            raise RuntimeError("Internal error: classifier not initialized for membership inference.")
         mia_stats = run_loss_attack(
             clf,
             syn_eval_loader,
@@ -436,6 +499,8 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
         )
         out.update(mia_stats)
     if cfg.shadow_mia.enabled:
+        if clf is None:
+            raise RuntimeError("Internal error: classifier not initialized for shadow MIA.")
         shadow_stats = run_shadow_attack(
             data_builder=data_builder,
             data_params=cfg.data.params,
@@ -476,21 +541,36 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
     out.setdefault("acc_ref_plus_synth", nan)
     if isinstance(target_ref, TensorDataset) and len(target_ref.tensors) >= 2:
         ref_supervised_ds = TensorDataset(target_ref.tensors[0], target_ref.tensors[1].long())
+        ref_supervised_ds = _subsample_labeled_dataset(
+            ref_supervised_ds,
+            n=cfg.stage3.ref_train_size,
+            num_classes=num_classes,
+            seed=cfg.seed,
+        )
         ref_train_loader = DataLoader(
             ref_supervised_ds,
             batch_size=cfg.loaders.target_batch_size,
             shuffle=True,
             drop_last=cfg.loaders.drop_last,
         )
-        ref_clf = Classifier(d=d, num_classes=num_classes, hidden=cfg.stage3.hidden)
-        ref_stats = train_classifier(
-            ref_clf,
-            ref_train_loader,
-            test_loader=target_test_loader,
-            epochs=cfg.stage3.epochs,
-            lr=cfg.stage3.lr,
-            device=device,
-        )
+        try:
+            ref_stats = train_random_forest_classifier(
+                ref_train_loader,
+                test_loader=target_test_loader,
+                seed=cfg.seed,
+                name="Classifier/RF-ref_only",
+            )
+        except RuntimeError as exc:
+            print(f"[Classifier/RF] WARNING: {exc} Falling back to MLP classifier.")
+            ref_clf = Classifier(d=d, num_classes=num_classes, hidden=cfg.stage3.hidden)
+            ref_stats = train_classifier(
+                ref_clf,
+                ref_train_loader,
+                test_loader=target_test_loader,
+                epochs=cfg.stage3.epochs,
+                lr=cfg.stage3.lr,
+                device=device,
+            )
         out["clf_loss_ref_only"] = float(ref_stats.get("clf_loss", nan))
         out["acc_ref_only"] = float(ref_stats.get("acc", nan))
 
@@ -502,15 +582,24 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
             shuffle=True,
             drop_last=cfg.loaders.drop_last,
         )
-        combined_clf = Classifier(d=d, num_classes=num_classes, hidden=cfg.stage3.hidden)
-        combined_stats = train_classifier(
-            combined_clf,
-            combined_loader,
-            test_loader=target_test_loader,
-            epochs=cfg.stage3.epochs,
-            lr=cfg.stage3.lr,
-            device=device,
-        )
+        try:
+            combined_stats = train_random_forest_classifier(
+                combined_loader,
+                test_loader=target_test_loader,
+                seed=cfg.seed,
+                name="Classifier/RF-ref+syn",
+            )
+        except RuntimeError as exc:
+            print(f"[Classifier/RF] WARNING: {exc} Falling back to MLP classifier.")
+            combined_clf = Classifier(d=d, num_classes=num_classes, hidden=cfg.stage3.hidden)
+            combined_stats = train_classifier(
+                combined_clf,
+                combined_loader,
+                test_loader=target_test_loader,
+                epochs=cfg.stage3.epochs,
+                lr=cfg.stage3.lr,
+                device=device,
+            )
         out["clf_loss_ref_plus_synth"] = float(combined_stats.get("clf_loss", nan))
         out["acc_ref_plus_synth"] = float(combined_stats.get("acc", nan))
     return out

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -91,11 +92,83 @@ def train_classifier(
             if test_loader is not None:
                 acc = eval_classifier(clf, test_loader, device=device)["acc"]
                 msg += f"  test_acc={acc:.3f}"
+                clf.train()
             print(msg)
 
     out: Dict[str, float] = {"clf_loss": last_loss}
     if test_loader is not None:
         out.update(eval_classifier(clf, test_loader, device=device))
+    return out
+
+
+def _collect_numpy_xy(loader: DataLoader) -> Tuple[np.ndarray, np.ndarray]:
+    dataset = getattr(loader, "dataset", None)
+    if dataset is not None:
+        try:
+            n_ds = len(dataset)
+        except TypeError:
+            n_ds = None
+        if n_ds is not None and n_ds > 0:
+            # For RF we want the full dataset (DataLoader.drop_last can otherwise drop samples).
+            batch_size = getattr(loader, "batch_size", None)
+            if batch_size is None:
+                batch_size = min(1024, n_ds)
+            batch_size = max(1, min(int(batch_size), int(n_ds)))
+            loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False)
+
+    xs: List[np.ndarray] = []
+    ys: List[np.ndarray] = []
+    for xb, yb in loader:
+        xs.append(xb.detach().cpu().numpy())
+        ys.append(yb.detach().cpu().numpy())
+    if not xs:
+        return np.empty((0, 0), dtype=np.float32), np.empty((0,), dtype=np.int64)
+    X = np.concatenate(xs, axis=0)
+    y = np.concatenate(ys, axis=0).reshape(-1).astype(np.int64, copy=False)
+    return X, y
+
+
+def train_random_forest_classifier(
+    train_loader: DataLoader,
+    test_loader: Optional[DataLoader] = None,
+    *,
+    seed: int = 0,
+    n_estimators: int = 200,
+    max_depth: Optional[int] = None,
+    name: str = "Classifier/RF",
+) -> Dict[str, float]:
+    try:
+        from sklearn.ensemble import RandomForestClassifier
+    except Exception as exc:
+        raise RuntimeError("scikit-learn is required for RandomForestClassifier (pip install scikit-learn).") from exc
+
+    X_train, y_train = _collect_numpy_xy(train_loader)
+    if X_train.size == 0:
+        raise ValueError("Empty training set for random forest classifier")
+
+    clf = RandomForestClassifier(
+        n_estimators=int(n_estimators),
+        max_depth=max_depth,
+        random_state=int(seed),
+        n_jobs=1,
+    )
+    clf.fit(X_train, y_train)
+
+    out: Dict[str, float] = {
+        "clf_loss": float("nan"),
+        "train_n": float(len(y_train)),
+    }
+    if test_loader is not None:
+        X_test, y_test = _collect_numpy_xy(test_loader)
+        if X_test.size == 0:
+            out["acc"] = float("nan")
+        else:
+            pred = clf.predict(X_test)
+            out["acc"] = float((pred == y_test).mean())
+        out["test_n"] = float(len(y_test))
+        print(
+            f"[{name}] train_n={int(out['train_n'])}  test_n={int(out['test_n'])}  n_estimators={n_estimators}  test_acc={out['acc']:.3f}"
+        )
     return out
 
 

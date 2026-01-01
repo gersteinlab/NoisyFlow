@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
 from noisyflow.stage2.networks import CellOTICNN, ICNN, RectifiedFlowOT
 from noisyflow.utils import DPConfig, cycle, unwrap_model
@@ -104,6 +104,7 @@ def train_ot_stage2_rectified_flow(
     source_loader: Optional[DataLoader],
     target_loader: DataLoader,
     option: str = "A",
+    pair_by_label: bool = False,
     synth_sampler: Optional[Callable[[int], torch.Tensor]] = None,
     epochs: int = 10,
     lr: float = 1e-3,
@@ -125,20 +126,69 @@ def train_ot_stage2_rectified_flow(
     if option == "B" and synth_sampler is None:
         raise ValueError("synth_sampler required for RectifiedFlow option B")
 
-    def _as_x(batch) -> torch.Tensor:
+    def _as_x_and_label(batch) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if isinstance(batch, (list, tuple)):
-            return batch[0]
-        return batch
+            x = batch[0]
+            label = batch[1] if len(batch) >= 2 else None
+            return x, label
+        return batch, None
 
     def _sample_target(target_iter, batch_size: int) -> torch.Tensor:
         chunks = []
         n = 0
         while n < batch_size:
-            tb = _as_x(next(target_iter))
+            tb, _ = _as_x_and_label(next(target_iter))
             chunks.append(tb)
             n += int(tb.shape[0])
         out = torch.cat(chunks, dim=0)
         return out[:batch_size]
+
+    target_pool_by_label: Optional[Dict[int, torch.Tensor]] = None
+    if pair_by_label:
+        if option != "A":
+            print("[Stage II/RectifiedFlow] WARNING: pair_by_label only supported for option 'A'; ignoring.")
+            pair_by_label = False
+        elif isinstance(getattr(target_loader, "dataset", None), TensorDataset) and len(target_loader.dataset.tensors) >= 2:
+            ys_all = target_loader.dataset.tensors[0].to(device).float()
+            ls_all = target_loader.dataset.tensors[1].to(device).long().view(-1)
+            if ls_all.numel() == 0:
+                print("[Stage II/RectifiedFlow] WARNING: target labels empty; disabling pair_by_label.")
+                pair_by_label = False
+            else:
+                num_classes = int(ls_all.max().item() + 1)
+                target_pool_by_label = {
+                    c: ys_all[ls_all == c] for c in range(num_classes)
+                }
+                empty = [c for c, pool in target_pool_by_label.items() if int(pool.shape[0]) == 0]
+                if empty:
+                    print(
+                        f"[Stage II/RectifiedFlow] WARNING: no target samples for labels {empty}; disabling pair_by_label."
+                    )
+                    target_pool_by_label = None
+                    pair_by_label = False
+        else:
+            print(
+                "[Stage II/RectifiedFlow] WARNING: pair_by_label requires target_loader.dataset to be a labeled TensorDataset; disabling."
+            )
+            pair_by_label = False
+
+    def _sample_target_matched(labels: torch.Tensor) -> torch.Tensor:
+        assert target_pool_by_label is not None
+        # Assume all target pools share the same feature shape (N, d).
+        some_pool = next(iter(target_pool_by_label.values()))
+        if some_pool.dim() != 2:
+            raise ValueError(f"Expected target features to have shape (N,d), got {tuple(some_pool.shape)}")
+        d = int(some_pool.shape[1])
+        out = torch.empty((labels.shape[0], d), device=device, dtype=some_pool.dtype)
+        for c in labels.unique().tolist():
+            c_int = int(c)
+            mask = labels == c_int
+            pool = target_pool_by_label.get(c_int, None)
+            if pool is None or int(pool.shape[0]) == 0:
+                raise ValueError(f"No target pool available for label {c_int}")
+            idx = torch.randint(0, int(pool.shape[0]), (int(mask.sum().item()),), device=device)
+            out[mask] = pool[idx]
+        return out
 
     v.to(device)
     v.train()
@@ -172,8 +222,13 @@ def train_ot_stage2_rectified_flow(
         if option == "A":
             assert source_loader is not None
             for xb in source_loader:
-                xb = _as_x(xb).to(device).float()
-                yb = _sample_target(target_iter, xb.shape[0]).to(device).float()
+                xb, x_labels = _as_x_and_label(xb)
+                xb = xb.to(device).float()
+                if pair_by_label and x_labels is not None and target_pool_by_label is not None:
+                    x_labels = x_labels.to(device).long().view(-1)
+                    yb = _sample_target_matched(x_labels)
+                else:
+                    yb = _sample_target(target_iter, xb.shape[0]).to(device).float()
 
                 loss = rectified_flow_ot_loss(v, xb, yb)
                 opt.zero_grad(set_to_none=True)

@@ -1,10 +1,19 @@
 import unittest
 
+import importlib.util
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from noisyflow.stage3.networks import Classifier
-from noisyflow.stage3.training import eval_classifier, sample_labels_from_prior, train_classifier
+from noisyflow.stage3.training import (
+    eval_classifier,
+    sample_labels_from_prior,
+    train_classifier,
+    train_random_forest_classifier,
+)
+
+
+sklearn_spec = importlib.util.find_spec("sklearn")
 
 
 class Stage3Tests(unittest.TestCase):
@@ -34,6 +43,19 @@ class Stage3Tests(unittest.TestCase):
         loader = DataLoader(TensorDataset(x, y), batch_size=5, shuffle=False)
         clf = Classifier(d=2, num_classes=1, hidden=[4])
         stats = eval_classifier(clf, loader, device="cpu")
+        self.assertIn("acc", stats)
+        self.assertGreaterEqual(stats["acc"], 0.0)
+        self.assertLessEqual(stats["acc"], 1.0)
+
+    @unittest.skipIf(sklearn_spec is None, "scikit-learn not installed")
+    def test_train_random_forest_classifier_smoke(self):
+        torch.manual_seed(0)
+        x = torch.randn(30, 3)
+        y = torch.randint(0, 2, (30,))
+        train_loader = DataLoader(TensorDataset(x, y), batch_size=10, shuffle=True)
+        test_loader = DataLoader(TensorDataset(x, y), batch_size=10, shuffle=False)
+        stats = train_random_forest_classifier(train_loader, test_loader=test_loader, seed=0, n_estimators=10)
+        self.assertIn("clf_loss", stats)
         self.assertIn("acc", stats)
         self.assertGreaterEqual(stats["acc"], 0.0)
         self.assertLessEqual(stats["acc"], 1.0)

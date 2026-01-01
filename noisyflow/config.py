@@ -74,6 +74,7 @@ class RectifiedFlowOTConfig:
 @dataclass
 class Stage2Config:
     option: str = "B"
+    pair_by_label: bool = False
     epochs: int = 30
     lr: float = 1e-3
     hidden: List[int] = field(default_factory=lambda: [128, 128])
@@ -95,6 +96,7 @@ class Stage3Config:
     hidden: List[int] = field(default_factory=lambda: [128, 128])
     flow_steps: int = 50
     M_per_client: int = 5000
+    ref_train_size: Optional[int] = None
 
 
 @dataclass
@@ -272,6 +274,7 @@ def load_config(path: str) -> ExperimentConfig:
     )
     stage2_cfg = Stage2Config(
         option=str(stage2_raw.get("option", "B")),
+        pair_by_label=bool(stage2_raw.get("pair_by_label", False)),
         epochs=int(stage2_raw.get("epochs", 30)),
         lr=float(stage2_raw.get("lr", 1e-3)),
         hidden=list(stage2_raw.get("hidden", [128, 128])),
@@ -287,12 +290,16 @@ def load_config(path: str) -> ExperimentConfig:
     )
 
     stage3_raw = data.get("stage3", {}) or {}
+    ref_train_size = stage3_raw.get("ref_train_size", None)
+    if ref_train_size is not None:
+        ref_train_size = int(ref_train_size)
     stage3_cfg = Stage3Config(
         epochs=int(stage3_raw.get("epochs", 30)),
         lr=float(stage3_raw.get("lr", 1e-3)),
         hidden=list(stage3_raw.get("hidden", [128, 128])),
         flow_steps=int(stage3_raw.get("flow_steps", 50)),
         M_per_client=int(stage3_raw.get("M_per_client", 5000)),
+        ref_train_size=ref_train_size,
     )
 
     privacy_raw = data.get("privacy_curve", {}) or {}

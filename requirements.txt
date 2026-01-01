@@ -5,3 +5,6 @@ opacus
 
 # Optional (only needed for privacy curve plots)
 # matplotlib
+
+# Optional (only needed for RandomForest ref+synthetic baseline)
+# scikit-learn
