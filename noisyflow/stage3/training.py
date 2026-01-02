@@ -23,13 +23,13 @@ def sample_labels_from_prior(prior: torch.Tensor, n: int) -> torch.Tensor:
 
 
 @torch.no_grad()
-def server_synthesize(
+def server_synthesize_with_raw(
     clients: List[Dict],
     M_per_client: int,
     num_classes: int,
     flow_steps: int = 50,
     device: str = "cpu",
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Server-side synthesis in Eq. (server-synth).
 
@@ -38,6 +38,7 @@ def server_synthesize(
       - "ot":   ICNN or CellOTICNN (DP-trained or post-processed)
       - optional "prior": tensor (C,)
     """
+    xs: List[torch.Tensor] = []
     ys: List[torch.Tensor] = []
     ls: List[torch.Tensor] = []
     for idx, c in enumerate(clients):
@@ -54,12 +55,32 @@ def server_synthesize(
         with torch.enable_grad():
             x_req = x_tilde.detach().requires_grad_(True)
             y_tilde = ot.transport(x_req)
+        xs.append(x_tilde.detach().cpu())
         ys.append(y_tilde.detach().cpu())
         ls.append(labels.cpu())
         print(f"[Server] client {idx} synthesized {M_per_client} samples")
 
+    X = torch.cat(xs, dim=0)
     Y = torch.cat(ys, dim=0)
     L = torch.cat(ls, dim=0)
+    return Y, L, X
+
+
+@torch.no_grad()
+def server_synthesize(
+    clients: List[Dict],
+    M_per_client: int,
+    num_classes: int,
+    flow_steps: int = 50,
+    device: str = "cpu",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    Y, L, _X = server_synthesize_with_raw(
+        clients,
+        M_per_client=M_per_client,
+        num_classes=num_classes,
+        flow_steps=flow_steps,
+        device=device,
+    )
     return Y, L
 
 

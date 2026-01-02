@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -16,20 +18,28 @@ from noisyflow.attacks.membership_inference import (
     run_stage_shadow_attack,
 )
 from noisyflow.config import ExperimentConfig, PrivacyCurveConfig, load_config
-from noisyflow.data import make_federated_mixture_gaussians, make_toy_federated_gaussians
+from noisyflow.data import (
+    make_cellot_lupuspatients_kang_hvg,
+    make_federated_cell_dataset,
+    make_federated_mixture_gaussians,
+    make_toy_federated_gaussians,
+)
 from noisyflow.stage1.networks import VelocityField
 from noisyflow.stage1.training import sample_flow_euler, train_flow_stage1
 from noisyflow.stage2.networks import CellOTICNN, ICNN, RectifiedFlowOT
 from noisyflow.stage2.training import train_ot_stage2, train_ot_stage2_cellot, train_ot_stage2_rectified_flow
 from noisyflow.stage3.networks import Classifier
-from noisyflow.stage3.training import server_synthesize, train_classifier, train_random_forest_classifier
+from noisyflow.stage3.training import server_synthesize_with_raw, train_classifier, train_random_forest_classifier
 from noisyflow.utils import DPConfig, dp_label_prior_from_counts, set_seed, unwrap_model
+from noisyflow.metrics import rbf_mmd2_multi_gamma, sliced_w2_distance
 
 
 data_builders = {
     "toy_federated_gaussians": make_toy_federated_gaussians,
     "federated_mixture_gaussians": make_federated_mixture_gaussians,
     "mixture_gaussians": make_federated_mixture_gaussians,
+    "federated_cell_dataset": make_federated_cell_dataset,
+    "cellot_lupuspatients_kang_hvg": make_cellot_lupuspatients_kang_hvg,
 }
 
 
@@ -200,8 +210,17 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
                 device="cpu",
             )
 
-        def synth_sampler(batch_size: int, flow=flow) -> torch.Tensor:
-            labels = torch.randint(0, num_classes, (batch_size,), device=device)
+        def synth_sampler(
+            batch_size: int,
+            labels: Optional[torch.Tensor] = None,
+            flow=flow,
+        ) -> torch.Tensor:
+            if labels is None:
+                labels = torch.randint(0, num_classes, (batch_size,), device=device)
+            else:
+                labels = labels.to(device).long().view(-1)
+                if int(labels.numel()) != int(batch_size):
+                    raise ValueError(f"labels must have shape ({batch_size},), got {tuple(labels.shape)}")
             return sample_flow_euler(flow.to(device).eval(), labels, n_steps=cfg.stage2.flow_steps).cpu()
 
         use_cellot = cfg.stage2.cellot.enabled
@@ -263,11 +282,12 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
             )
             ot_stats = train_ot_stage2_rectified_flow(
                 ot,
-                source_loader=real_x_loader if cfg.stage2.option.upper() == "A" else None,
+                source_loader=real_x_loader if cfg.stage2.option.upper() in {"A", "C"} else None,
                 target_loader=target_loader,
                 option=cfg.stage2.option,
                 pair_by_label=cfg.stage2.pair_by_label,
-                synth_sampler=(lambda bs: synth_sampler(bs)) if cfg.stage2.option.upper() == "B" else None,
+                pair_by_ot=cfg.stage2.pair_by_ot,
+                synth_sampler=synth_sampler if cfg.stage2.option.upper() in {"B", "C"} else None,
                 epochs=cfg.stage2.epochs,
                 lr=cfg.stage2.lr,
                 dp=cfg.stage2.dp,
@@ -285,7 +305,7 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
                 real_loader=real_x_loader if cfg.stage2.option.upper() in {"A", "C"} else None,
                 target_loader=target_loader,
                 option=cfg.stage2.option,
-                synth_sampler=(lambda bs: synth_sampler(bs)) if cfg.stage2.option.upper() in {"B", "C"} else None,
+                synth_sampler=synth_sampler if cfg.stage2.option.upper() in {"B", "C"} else None,
                 epochs=cfg.stage2.epochs,
                 lr=cfg.stage2.lr,
                 dp=cfg.stage2.dp,
@@ -310,13 +330,62 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
                 }
             )
 
-    y_syn, l_syn = server_synthesize(
+    stats_sw2: Dict[str, float] = {}
+    if isinstance(target_ref, TensorDataset) and len(target_ref.tensors) >= 1:
+        try:
+            x_ref = target_ref.tensors[0]
+            x_private = torch.cat([ds.tensors[0] for ds in client_datasets], dim=0)
+            sw2_private_ref = sliced_w2_distance(x_private, x_ref, num_projections=128, max_samples=2000, seed=cfg.seed)
+            stats_sw2["sw2_private_ref"] = float(sw2_private_ref)
+        except Exception as exc:
+            print(f"[Metrics/SW2] WARNING: failed to compute sw2_private_ref ({exc})")
+            stats_sw2 = {}
+
+    y_syn, l_syn, x_syn_raw = server_synthesize_with_raw(
         clients_out,
         M_per_client=cfg.stage3.M_per_client,
         num_classes=num_classes,
         flow_steps=cfg.stage3.flow_steps,
         device=device,
     )
+    if isinstance(target_ref, TensorDataset) and len(target_ref.tensors) >= 1:
+        try:
+            x_ref = target_ref.tensors[0]
+            stats_sw2["sw2_synth_ref"] = float(
+                sliced_w2_distance(x_syn_raw, x_ref, num_projections=128, max_samples=2000, seed=cfg.seed)
+            )
+            stats_sw2["sw2_synth_transported_ref"] = float(
+                sliced_w2_distance(y_syn, x_ref, num_projections=128, max_samples=2000, seed=cfg.seed)
+            )
+            print(
+                "[Metrics/SW2] private~ref={:.4f}  synth~ref={:.4f}  transported~ref={:.4f}".format(
+                    stats_sw2.get("sw2_private_ref", float("nan")),
+                    stats_sw2.get("sw2_synth_ref", float("nan")),
+                    stats_sw2.get("sw2_synth_transported_ref", float("nan")),
+                )
+            )
+        except Exception as exc:
+            print(f"[Metrics/SW2] WARNING: failed to compute SW2 metrics ({exc})")
+            stats_sw2 = {}
+    stats_mmd: Dict[str, float] = {}
+    if cfg.data.type in {"federated_cell_dataset", "cellot_lupuspatients_kang_hvg"}:
+        try:
+            gammas = [2.0, 1.0, 0.5, 0.1, 0.01, 0.005]
+            mmds = rbf_mmd2_multi_gamma(
+                y_syn,
+                target_test.tensors[0],
+                gammas=gammas,
+                max_samples=2000,
+                seed=cfg.seed,
+            )
+            stats_mmd = {
+                "mmd_rbf_min": float(min(mmds)),
+                "mmd_rbf_mean": float(sum(mmds) / float(len(mmds))),
+            }
+            print(f"[Metrics/MMD] min={stats_mmd['mmd_rbf_min']:.6f} mean={stats_mmd['mmd_rbf_mean']:.6f}")
+        except Exception as exc:
+            print(f"[Metrics/MMD] WARNING: failed to compute MMD ({exc})")
+            stats_mmd = {}
     syn_loader = DataLoader(
         TensorDataset(y_syn, l_syn),
         batch_size=cfg.loaders.synth_batch_size,
@@ -350,6 +419,8 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
             device=device,
         )
     out: Dict[str, float] = dict(stats)
+    out.update(stats_mmd)
+    out.update(stats_sw2)
 
     if (cfg.membership_inference.enabled or cfg.shadow_mia.enabled) and clf is None:
         clf = Classifier(d=d, num_classes=num_classes, hidden=cfg.stage3.hidden)
@@ -575,6 +646,12 @@ def run_experiment(cfg: ExperimentConfig) -> Dict[str, float]:
         out["acc_ref_only"] = float(ref_stats.get("acc", nan))
 
         syn_supervised_ds = TensorDataset(y_syn, l_syn)
+        syn_supervised_ds = _subsample_labeled_dataset(
+            syn_supervised_ds,
+            n=cfg.stage3.combined_synth_train_size,
+            num_classes=num_classes,
+            seed=cfg.seed,
+        )
         combined_ds = ConcatDataset([ref_supervised_ds, syn_supervised_ds])
         combined_loader = DataLoader(
             combined_ds,
@@ -623,7 +700,18 @@ def _select_epsilon(stats: Dict[str, float], stage: str) -> Optional[float]:
     raise ValueError(f"Unknown privacy curve stage '{stage}'")
 
 
-def _plot_privacy_curve(results: List[Dict[str, Optional[float]]], output_path: str) -> None:
+def _metric_label(metric: str) -> str:
+    metric = metric.strip()
+    if metric == "acc":
+        return "accuracy (synth)"
+    if metric == "acc_ref_only":
+        return "accuracy (ref only)"
+    if metric == "acc_ref_plus_synth":
+        return "accuracy (ref+synth)"
+    return metric
+
+
+def _plot_privacy_curve(results: List[Dict[str, Optional[float]]], output_path: str, metric: str) -> None:
     try:
         import matplotlib
 
@@ -632,9 +720,13 @@ def _plot_privacy_curve(results: List[Dict[str, Optional[float]]], output_path: 
     except Exception as e:
         raise RuntimeError("matplotlib is required for plotting. Install matplotlib.") from e
 
-    points = [(r["epsilon"], r["acc"]) for r in results if r.get("epsilon") is not None and r.get("acc") is not None]
+    points = [
+        (r["epsilon"], r["utility"])
+        for r in results
+        if r.get("epsilon") is not None and r.get("utility") is not None
+    ]
     if not points:
-        raise RuntimeError("No valid (epsilon, acc) points available for plotting.")
+        raise RuntimeError("No valid (epsilon, utility) points available for plotting.")
 
     points.sort(key=lambda x: x[0])
     xs = [p[0] for p in points]
@@ -643,7 +735,7 @@ def _plot_privacy_curve(results: List[Dict[str, Optional[float]]], output_path: 
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.plot(xs, ys, marker="o")
     ax.set_xlabel("epsilon (approx)")
-    ax.set_ylabel("accuracy")
+    ax.set_ylabel(_metric_label(metric))
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -657,6 +749,10 @@ def run_privacy_curve(cfg: ExperimentConfig, curve_cfg: PrivacyCurveConfig) -> L
 
     if stage in {"stage2", "both"} and cfg.stage2.option.upper() not in {"A", "C"}:
         raise ValueError("privacy_curve.stage includes stage2 but stage2.option is not A or C")
+
+    metric = curve_cfg.metric.strip()
+    if not metric:
+        raise ValueError("privacy_curve.metric must be a non-empty stats key (e.g., 'acc_ref_plus_synth').")
 
     results: List[Dict[str, Optional[float]]] = []
     for nm in curve_cfg.noise_multipliers:
@@ -672,11 +768,20 @@ def run_privacy_curve(cfg: ExperimentConfig, curve_cfg: PrivacyCurveConfig) -> L
             {
                 "noise_multiplier": float(nm),
                 "epsilon": _select_epsilon(stats, stage),
-                "acc": stats.get("acc"),
+                "utility": stats.get(metric),
             }
         )
 
-    _plot_privacy_curve(results, curve_cfg.output_path)
+    out_path = Path(curve_cfg.output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _plot_privacy_curve(results, str(out_path), metric=metric)
+    try:
+        json_path = out_path.with_suffix(".json")
+        payload = {"stage": stage, "metric": metric, "results": results}
+        json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"Saved privacy-utility sweep results to {json_path}")
+    except Exception as exc:  # pragma: no cover
+        print(f"[PrivacyCurve] WARNING: failed to write JSON results ({exc})")
     return results
 
 

@@ -1,0 +1,51 @@
+\documentclass[11pt]{article}
+
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage[margin=1in]{geometry}
+
+\newcommand{\NoisyFlow}{NoisyFlow}
+
+\title{Hard Synthetic Mixture-of-Gaussians Benchmark (Ref-100)}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Dataset construction}
+We consider a federated mixture-of-Gaussians classification benchmark (\texttt{federated\_mixture\_gaussians}).
+Let $C$ denote the number of classes and $d$ the feature dimension.
+We sample class means $\{\mu_c\}_{c=1}^C$ with $\mu_c \sim \mathcal{N}(0,\alpha^2 I)$ and generate labeled base samples by drawing $y \sim \mathrm{Unif}(\{1,\dots,C\})$ and $x_0 \sim \mathcal{N}(\mu_y,\beta^2 I)$.
+Federated heterogeneity is induced by applying an independent random affine map per client, $x = A_k x_0 + b_k$, yielding $K$ source domains.
+We generate the target domain by applying a separate affine map $x = A_t x_0 + b_t$ and split it into a target-reference set and a target-test set.
+
+\paragraph{Parameters.}
+We set $K=3$, $n_{\text{per\_client}}=1500$, $n_{\text{target\_ref}}=2000$, $n_{\text{target\_test}}=1000$, $d=50$, $C=6$, $\alpha=0.45$ (\texttt{component\_scale}), $\beta=1.15$ (\texttt{component\_cov}), and seed $=0$.
+
+\section{Results (seed=0)}
+We evaluate classification accuracy on the target-test split.
+We train RandomForest classifiers on (i) \textbf{Ref-only:} $n_{\text{ref}}=100$ labeled target-reference examples, (ii) \textbf{Synth-only:} transported synthetic target-like examples, and (iii) \textbf{Ref+Synth:} the union of the two training sets.
+We generate $K \cdot M_{\text{per\_client}} = 3 \cdot 5000 = 15{,}000$ labeled transported synthetic samples.
+Table~\ref{tab:mog-ref100} shows that augmenting the labeled target-reference set with transported synthetic samples improves accuracy by 6.8 points over the ref-only baseline.
+
+\begin{table}[t]
+  \centering
+  \begin{tabular}{lccccc}
+    \toprule
+    Setting &
+    Train $n$ &
+    Test $n$ &
+    Acc &
+    $\Delta$ (vs Ref-only) \\
+    \midrule
+    Ref-only ($n_{\text{ref}}=100$) & 100 & 1000 & 0.602 & --- \\
+    Synth-only ($K\cdot M_{\text{per\_client}}$) & 15000 & 1000 & 0.671 & +0.069 \\
+    Ref+Synth & 15100 & 1000 & 0.670 & +0.068 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Synthetic mixture-of-Gaussians benchmark (single run, seed=0). $\Delta=\text{Acc}-\text{Acc(Ref-only)}$.}
+  \label{tab:mog-ref100}
+\end{table}
+
+\end{document}

@@ -105,7 +105,8 @@ def train_ot_stage2_rectified_flow(
     target_loader: DataLoader,
     option: str = "A",
     pair_by_label: bool = False,
-    synth_sampler: Optional[Callable[[int], torch.Tensor]] = None,
+    pair_by_ot: bool = False,
+    synth_sampler: Optional[Callable[..., torch.Tensor]] = None,
     epochs: int = 10,
     lr: float = 1e-3,
     dp: Optional[DPConfig] = None,
@@ -117,14 +118,15 @@ def train_ot_stage2_rectified_flow(
     Options:
       - "A": source from private real data (supports DP-SGD on v)
       - "B": source from synthetic sampler (post-processing; ignores dp)
+      - "C": mix private real data + synthetic source (supports DP-SGD on v)
     """
     option = option.upper()
-    if option not in {"A", "B"}:
-        raise ValueError("RectifiedFlow OT supports option 'A' or 'B'.")
-    if option == "A" and source_loader is None:
-        raise ValueError("source_loader required for RectifiedFlow option A")
-    if option == "B" and synth_sampler is None:
-        raise ValueError("synth_sampler required for RectifiedFlow option B")
+    if option not in {"A", "B", "C"}:
+        raise ValueError("RectifiedFlow OT supports option 'A', 'B', or 'C'.")
+    if option in {"A", "C"} and source_loader is None:
+        raise ValueError(f"source_loader required for RectifiedFlow option {option}")
+    if option in {"B", "C"} and synth_sampler is None:
+        raise ValueError(f"synth_sampler required for RectifiedFlow option {option}")
 
     def _as_x_and_label(batch) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if isinstance(batch, (list, tuple)):
@@ -143,12 +145,47 @@ def train_ot_stage2_rectified_flow(
         out = torch.cat(chunks, dim=0)
         return out[:batch_size]
 
+    def _hungarian_match(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if source.shape != target.shape:
+            raise ValueError(f"OT matching requires same shapes, got {source.shape} vs {target.shape}")
+        try:
+            import numpy as np
+            from scipy.optimize import linear_sum_assignment
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("pair_by_ot requires SciPy (pip install scipy).") from exc
+
+        xs = source.detach().cpu().numpy()
+        ys = target.detach().cpu().numpy()
+        cost = ((xs[:, None, :] - ys[None, :, :]) ** 2).sum(axis=2)
+        row_ind, col_ind = linear_sum_assignment(cost)
+        perm = np.empty_like(col_ind)
+        perm[row_ind] = col_ind
+        perm_t = torch.from_numpy(perm).to(device=target.device, dtype=torch.long)
+        return target.index_select(0, perm_t)
+
+    def _match_target(
+        source: torch.Tensor,
+        target: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if not pair_by_ot:
+            return target
+        if labels is None:
+            return _hungarian_match(source, target)
+        labels = labels.to(source.device).long().view(-1)
+        out = target.clone()
+        for c in labels.unique().tolist():
+            c_int = int(c)
+            mask = labels == c_int
+            idx = mask.nonzero(as_tuple=False).view(-1)
+            if int(idx.numel()) <= 1:
+                continue
+            out[idx] = _hungarian_match(source[idx], target[idx])
+        return out
+
     target_pool_by_label: Optional[Dict[int, torch.Tensor]] = None
-    if pair_by_label:
-        if option != "A":
-            print("[Stage II/RectifiedFlow] WARNING: pair_by_label only supported for option 'A'; ignoring.")
-            pair_by_label = False
-        elif isinstance(getattr(target_loader, "dataset", None), TensorDataset) and len(target_loader.dataset.tensors) >= 2:
+    if pair_by_label and option in {"A", "C"}:
+        if isinstance(getattr(target_loader, "dataset", None), TensorDataset) and len(target_loader.dataset.tensors) >= 2:
             ys_all = target_loader.dataset.tensors[0].to(device).float()
             ls_all = target_loader.dataset.tensors[1].to(device).long().view(-1)
             if ls_all.numel() == 0:
@@ -195,7 +232,7 @@ def train_ot_stage2_rectified_flow(
     opt = torch.optim.Adam(v.parameters(), lr=lr)
 
     privacy_engine = None
-    if dp is not None and dp.enabled and option == "A":
+    if dp is not None and dp.enabled and option in {"A", "C"}:
         try:
             from opacus import PrivacyEngine
         except Exception as e:
@@ -214,6 +251,11 @@ def train_ot_stage2_rectified_flow(
             dp=dp,
             grad_sample_mode=getattr(dp, "grad_sample_mode", None),
         )
+        if pair_by_ot:
+            print(
+                "[Stage II/RectifiedFlow] WARNING: pair_by_ot is ignored when using DP-SGD (stage2.option in {'A','C'}) because OT matching couples samples within a batch."
+            )
+            pair_by_ot = False
 
     target_iter = cycle(target_loader)
 
@@ -229,16 +271,62 @@ def train_ot_stage2_rectified_flow(
                     yb = _sample_target_matched(x_labels)
                 else:
                     yb = _sample_target(target_iter, xb.shape[0]).to(device).float()
+                yb = _match_target(xb, yb, labels=x_labels if pair_by_label else None)
 
                 loss = rectified_flow_ot_loss(v, xb, yb)
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 opt.step()
                 last_loss = float(loss.detach().cpu().item())
+        elif option == "C":
+            assert source_loader is not None
+            assert synth_sampler is not None
+            for xb in source_loader:
+                xb, x_labels = _as_x_and_label(xb)
+                xb = xb.to(device).float()
+                if x_labels is not None:
+                    x_labels = x_labels.to(device).long().view(-1)
+
+                if pair_by_label and x_labels is not None and target_pool_by_label is not None:
+                    yb_real = _sample_target_matched(x_labels)
+                    yb_syn = _sample_target_matched(x_labels)
+                    try:
+                        xb_syn = synth_sampler(xb.shape[0], labels=x_labels).to(device).float()  # type: ignore[misc]
+                    except TypeError:
+                        xb_syn = synth_sampler(xb.shape[0]).to(device).float()  # type: ignore[misc]
+                    labels_syn = x_labels
+                else:
+                    yb_real = _sample_target(target_iter, xb.shape[0]).to(device).float()
+                    yb_syn = _sample_target(target_iter, xb.shape[0]).to(device).float()
+                    xb_syn = synth_sampler(xb.shape[0]).to(device).float()  # type: ignore[misc]
+                    labels_syn = None
+
+                xb_cat = torch.cat([xb, xb_syn], dim=0)
+                yb_cat = torch.cat([yb_real, yb_syn], dim=0)
+                if pair_by_label and x_labels is not None:
+                    labels_cat = torch.cat([x_labels, labels_syn if labels_syn is not None else x_labels], dim=0)
+                else:
+                    labels_cat = None
+                yb_cat = _match_target(xb_cat, yb_cat, labels=labels_cat if pair_by_label else None)
+
+                loss = rectified_flow_ot_loss(v, xb_cat, yb_cat)
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                opt.step()
+                last_loss = float(loss.detach().cpu().item())
         else:
             for yb in target_loader:
-                yb = _as_x(yb).to(device).float()
-                xb = synth_sampler(yb.shape[0]).to(device).float()  # type: ignore[misc]
+                yb, y_labels = _as_x_and_label(yb)
+                yb = yb.to(device).float()
+                if pair_by_label and y_labels is not None:
+                    y_labels = y_labels.to(device).long().view(-1)
+                    try:
+                        xb = synth_sampler(yb.shape[0], labels=y_labels).to(device).float()  # type: ignore[misc]
+                    except TypeError:
+                        xb = synth_sampler(yb.shape[0]).to(device).float()  # type: ignore[misc]
+                else:
+                    xb = synth_sampler(yb.shape[0]).to(device).float()  # type: ignore[misc]
+                yb = _match_target(xb, yb, labels=y_labels if pair_by_label else None)
 
                 loss = rectified_flow_ot_loss(v, xb, yb)
                 opt.zero_grad(set_to_none=True)

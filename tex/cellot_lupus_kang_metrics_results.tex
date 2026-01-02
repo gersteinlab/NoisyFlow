@@ -1,0 +1,50 @@
+\section{Dataset}
+We use the \CellOT{} preprocessed Kang lupuspatients scRNA-seq dataset (\texttt{datasets/scrna-lupuspatients/kang-hvg.h5ad}). It contains 28{,}871 cells measured over 1{,}000 highly-variable genes (HVGs), and provides per-cell annotations for:
+(i) \texttt{condition} $\in \{\texttt{ctrl},\texttt{stim}\}$,
+(ii) \texttt{sample\_id} (patient id),
+and (iii) \texttt{cell\_type} (8 immune cell types).
+
+\paragraph{Source/target domains.}
+We treat \texttt{ctrl} cells as the source distribution and \texttt{stim} cells as the target distribution (control$\rightarrow$stimulated transport).
+
+\paragraph{OOD evaluation split.}
+We evaluate on stimulated (\texttt{stim}) cells from the held-out patient \texttt{sample\_id=101}. All reported accuracies are measured on this held-out stimulated test set.
+
+\section{Metrics}
+\paragraph{Downstream accuracy (OOD).}
+We report \textbf{cell-type classification accuracy} on the stimulated (\texttt{stim}) cells from the held-out patient \texttt{sample\_id=101}. This is an 8-way classification problem using the provided \texttt{cell\_type} annotations.
+
+\paragraph{Distributional alignment (RBF MMD$^2$).}
+To quantify how well the generated target-like distribution matches the real target distribution, we compute the squared Maximum Mean Discrepancy (MMD$^2$) with an RBF kernel between:
+(i) the synthetic transported samples $\tilde{Y}$, and
+(ii) the held-out stimulated test cells $Y_{\text{test}}$ (patient \texttt{101}).
+We evaluate MMD$^2$ over $\gamma \in \{2, 1, 0.5, 0.1, 0.01, 0.005\}$ and report the minimum and the mean across $\gamma$.
+For scalability, both sets are subsampled to at most 2{,}000 points (seeded).
+
+\section{Results (seed=0, $n_{\text{ref}}=50$)}
+We compare three classifier training regimes:
+(1) \textbf{Ref-only}: train using only $n_{\text{ref}}$ labeled target-reference (\texttt{stim}) cells;
+(2) \textbf{Synth-only}: train using only \NoisyFlow{} synthetic labeled target-like cells;
+(3) \textbf{Ref+Synth}: train on the union of Ref-only and Synth-only data.
+Here we fix the labeled target budget to $n_{\text{ref}}=50$.
+
+\begin{table}[t]
+  \centering
+  \begin{tabular}{lcccccc}
+    \toprule
+    $n_{\text{ref}}$ &
+    Acc (Ref-only) &
+    Acc (Synth-only) &
+    Acc (Ref+Synth) &
+    $\Delta$ &
+    MMD$_{\min}$ &
+    MMD$_{\text{mean}}$ \\
+    \midrule
+    50 & 0.770 & 0.792 & 0.798 & +0.028 & 0.00217 & 0.00578 \\
+    \bottomrule
+  \end{tabular}
+  \caption{\textbf{Kang lupuspatients OOD test} (stimulated cells from held-out patient \texttt{sample\_id=101}). $\Delta=\text{Acc(Ref+Synth)}-\text{Acc(Ref-only)}$.}
+  \label{tab:kang-ref50}
+\end{table}
+
+With $n_{\text{ref}}=50$ labeled target cells, adding synthetic data improves accuracy from 0.770 to 0.798 (+0.028 absolute).

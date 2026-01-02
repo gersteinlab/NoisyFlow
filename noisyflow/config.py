@@ -75,6 +75,7 @@ class RectifiedFlowOTConfig:
 class Stage2Config:
     option: str = "B"
     pair_by_label: bool = False
+    pair_by_ot: bool = False
     epochs: int = 30
     lr: float = 1e-3
     hidden: List[int] = field(default_factory=lambda: [128, 128])
@@ -97,6 +98,7 @@ class Stage3Config:
     flow_steps: int = 50
     M_per_client: int = 5000
     ref_train_size: Optional[int] = None
+    combined_synth_train_size: Optional[int] = None
 
 
 @dataclass
@@ -105,6 +107,7 @@ class PrivacyCurveConfig:
     stage: str = "stage1"
     noise_multipliers: List[float] = field(default_factory=lambda: [0.5, 1.0, 2.0, 4.0])
     output_path: str = "privacy_utility.png"
+    metric: str = "acc"
 
 
 @dataclass
@@ -275,6 +278,7 @@ def load_config(path: str) -> ExperimentConfig:
     stage2_cfg = Stage2Config(
         option=str(stage2_raw.get("option", "B")),
         pair_by_label=bool(stage2_raw.get("pair_by_label", False)),
+        pair_by_ot=bool(stage2_raw.get("pair_by_ot", False)),
         epochs=int(stage2_raw.get("epochs", 30)),
         lr=float(stage2_raw.get("lr", 1e-3)),
         hidden=list(stage2_raw.get("hidden", [128, 128])),
@@ -293,6 +297,9 @@ def load_config(path: str) -> ExperimentConfig:
     ref_train_size = stage3_raw.get("ref_train_size", None)
     if ref_train_size is not None:
         ref_train_size = int(ref_train_size)
+    combined_synth_train_size = stage3_raw.get("combined_synth_train_size", None)
+    if combined_synth_train_size is not None:
+        combined_synth_train_size = int(combined_synth_train_size)
     stage3_cfg = Stage3Config(
         epochs=int(stage3_raw.get("epochs", 30)),
         lr=float(stage3_raw.get("lr", 1e-3)),
@@ -300,6 +307,7 @@ def load_config(path: str) -> ExperimentConfig:
         flow_steps=int(stage3_raw.get("flow_steps", 50)),
         M_per_client=int(stage3_raw.get("M_per_client", 5000)),
         ref_train_size=ref_train_size,
+        combined_synth_train_size=combined_synth_train_size,
     )
 
     privacy_raw = data.get("privacy_curve", {}) or {}
@@ -308,6 +316,7 @@ def load_config(path: str) -> ExperimentConfig:
         stage=str(privacy_raw.get("stage", "stage1")),
         noise_multipliers=list(privacy_raw.get("noise_multipliers", [0.5, 1.0, 2.0, 4.0])),
         output_path=str(privacy_raw.get("output_path", "privacy_utility.png")),
+        metric=str(privacy_raw.get("metric", "acc")),
     )
 
     mia_raw = data.get("membership_inference", {}) or {}

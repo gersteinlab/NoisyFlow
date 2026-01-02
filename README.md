@@ -2,7 +2,7 @@
 
 NoisyFlow is a three-stage pipeline for federated synthetic data generation with optional differential privacy.
 It trains a flow-matching generator per client, fits an optimal transport map to a target domain, and
-then synthesizes data for downstream classification.
+then synthesizes target-like data for downstream classification tasks. The framework has two main goals: (1) enable domain adaptation by generating data that matches a target distribution, so that classifiers trained on the synthetic (domain-transferred) data perform better on the target domain than classifiers trained only on the original (source) domains; and (2) allow combining both original and transferred data to further improve classification accuracy on the desired target domain (3) all of these have privacy guarantee.
 
 ## Features
 - Stage 1: flow matching generator with optional DP-SGD (Opacus).
@@ -20,7 +20,7 @@ pip install opacus  # optional, DP-SGD in stage1/stage2
 pip install matplotlib  # optional, privacy curve plots
 ```
 
-## Quickstart
+## Quickstart 22
 ```bash
 python run.py --config configs/default.yaml
 ```

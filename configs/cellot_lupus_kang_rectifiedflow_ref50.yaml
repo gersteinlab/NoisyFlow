@@ -1,0 +1,77 @@
+seed: 0
+device: cpu
+
+data:
+  type: cellot_lupuspatients_kang_hvg
+  params:
+    path: datasets/scrna-lupuspatients/kang-hvg.h5ad
+    holdout_client: 101
+    split_mode: ood
+    max_clients: 3
+    min_cells_per_client: 500
+    target_ref_size: 8000
+    target_test_size: 600
+    pca_dim: 50
+    standardize: false
+    seed: 0
+
+loaders:
+  batch_size: 256
+  target_batch_size: 256
+  test_batch_size: 512
+  synth_batch_size: 512
+  drop_last: true
+
+stage1:
+  epochs: 10
+  lr: 0.001
+  hidden: [256, 256]
+  time_emb_dim: 64
+  label_emb_dim: 32
+  label_prior:
+    enabled: true
+    mechanism: gaussian
+    sigma: 1.0
+  dp:
+    enabled: false
+
+stage2:
+  option: A
+  pair_by_label: true
+  epochs: 10
+  lr: 0.001
+  flow_steps: 30
+  dp:
+    enabled: false
+  rectified_flow:
+    enabled: true
+    hidden: [256, 256]
+    time_emb_dim: 64
+    act: silu
+    transport_steps: 25
+  cellot:
+    enabled: false
+
+stage3:
+  epochs: 10
+  lr: 0.001
+  hidden: [256, 256]
+  flow_steps: 30
+  M_per_client: 2000
+  ref_train_size: 50
+
+privacy_curve:
+  enabled: false
+
+membership_inference:
+  enabled: false
+
+shadow_mia:
+  enabled: false
+
+stage_mia:
+  enabled: false
+
+stage_shadow_mia:
+  enabled: false
+

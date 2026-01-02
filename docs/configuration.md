@@ -32,7 +32,7 @@ data:
 - `stage_shadow_mia`: Shadow-model attack on stage 1/2 models.
 
 ## `data`
-- `type`: `federated_mixture_gaussians`, `mixture_gaussians` (alias), or `toy_federated_gaussians`.
+- `type`: `federated_mixture_gaussians`, `mixture_gaussians` (alias), `toy_federated_gaussians`, `federated_cell_dataset`, or `cellot_lupuspatients_kang_hvg`.
 - `params`: Passed through to the chosen data builder. See `docs/data.md`.
 
 ## `loaders`
@@ -75,11 +75,15 @@ data:
 - `hidden`: Classifier MLP sizes.
 - `flow_steps`: Euler steps for server-side sampling.
 - `M_per_client`: Number of synthetic samples per client.
+- `ref_train_size`: Labeled target points used for `acc_ref_only` / `acc_ref_plus_synth` baselines.
+- `combined_synth_train_size`: Optional cap on synthetic samples used in the `ref+synth` classifier training.
 
 ## `privacy_curve`
 - `enabled`: Boolean. If true, `run.py` runs a sweep and writes a plot.
 - `stage`: `stage1`, `stage2`, or `both`.
   - `stage2` and `both` require `stage2.option` to be `A` or `C`.
+- `metric`: Which `run_experiment` stats key to plot as utility (default: `acc`).
+  - Common choices: `acc` (synth-only), `acc_ref_plus_synth`, `acc_ref_only`.
 - `noise_multipliers`: List of DP noise multipliers.
 - `output_path`: Plot file path (requires Matplotlib).
 

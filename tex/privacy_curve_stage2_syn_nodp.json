@@ -1,0 +1,26 @@
+{
+  "stage": "stage1",
+  "metric": "acc_ref_plus_synth",
+  "results": [
+    {
+      "noise_multiplier": 0.5,
+      "epsilon": 105.888527117483,
+      "utility": 0.8738670694864048
+    },
+    {
+      "noise_multiplier": 1.0,
+      "epsilon": 37.633687472303755,
+      "utility": 0.8632930513595166
+    },
+    {
+      "noise_multiplier": 2.0,
+      "epsilon": 14.84056471168065,
+      "utility": 0.8413897280966768
+    },
+    {
+      "noise_multiplier": 4.0,
+      "epsilon": 6.3360332412805,
+      "utility": 0.790785498489426
+    }
+  ]
+}

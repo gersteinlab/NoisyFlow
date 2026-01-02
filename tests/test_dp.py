@@ -112,6 +112,40 @@ class DPTests(unittest.TestCase):
         self.assertTrue(math.isfinite(stats["ot_loss"]))
         self.assertEqual(stats["delta_ot"], dp.delta)
 
+    def test_stage2_rectified_flow_mixed_dp_reports_epsilon(self):
+        torch.manual_seed(0)
+        x = torch.randn(20, 2)
+        y = torch.randn(20, 2)
+        source_loader = DataLoader(TensorDataset(x), batch_size=5, shuffle=True, drop_last=True)
+        target_loader = DataLoader(TensorDataset(y), batch_size=7, shuffle=True, drop_last=True)
+
+        model = RectifiedFlowOT(d=2, hidden=[8, 8], time_emb_dim=8, act="silu", transport_steps=5)
+
+        def synth_sampler(bs: int, **_kwargs) -> torch.Tensor:
+            return torch.randn(bs, 2)
+
+        dp = DPConfig(enabled=True, max_grad_norm=1.0, noise_multiplier=1.0, delta=1e-5)
+        stats = train_ot_stage2_rectified_flow(
+            model,
+            source_loader=source_loader,
+            target_loader=target_loader,
+            option="C",
+            synth_sampler=synth_sampler,
+            epochs=1,
+            lr=1e-3,
+            dp=dp,
+            device="cpu",
+        )
+
+        self.assertIn("epsilon_ot", stats)
+        self.assertIn("delta_ot", stats)
+        self.assertIn("ot_loss", stats)
+        self.assertGreater(stats["epsilon_ot"], 0.0)
+        self.assertGreater(stats["delta_ot"], 0.0)
+        self.assertTrue(math.isfinite(stats["epsilon_ot"]))
+        self.assertTrue(math.isfinite(stats["ot_loss"]))
+        self.assertEqual(stats["delta_ot"], dp.delta)
+
 
 if __name__ == "__main__":
     unittest.main()

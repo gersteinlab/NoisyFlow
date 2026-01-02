@@ -8,6 +8,7 @@
 - `tests/` contains the unit test suite; `run.py` is the primary CLI entrypoint.
 
 ## Build, Test, and Development Commands
+- Prefer to use cuda/gpu to test as opposed to cpu.
 - `python run.py --config configs/default.yaml` runs the default experiment.
 - `python run.py --config configs/quick_smoke.yaml` runs a small smoke test (set `device: cpu` if you do not have CUDA).
 - `python -m unittest discover -s tests` runs the full test suite.
@@ -31,3 +32,11 @@
 ## Configuration & Reproducibility Tips
 - Experiment settings live in `configs/*.yaml`. Keep changes localized and update `seed`, `device`, and stage blocks as needed.
 - `run.py` defaults to `configs/default.yaml`; enable sweeps with `privacy_curve.enabled: true`.
+
+
+## Plotting & Figures
+- put the plots in /plots folder
+- All visualizations and figures should be output as `.pdf` (vector graphics).
+- Use publication-quality styles: distinct line types, clear markers, readable axis labels and legends.
+- Prefer color palettes accessible to reviewers (e.g., colorblind-friendly).
+

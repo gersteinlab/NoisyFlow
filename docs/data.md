@@ -9,6 +9,8 @@ All data builders return:
 - `federated_mixture_gaussians`
 - `mixture_gaussians` (alias of `federated_mixture_gaussians`)
 - `toy_federated_gaussians`
+- `federated_cell_dataset` (generic `.h5ad` / `.npz` single-cell loader)
+- `cellot_lupuspatients_kang_hvg` (CellOT Kang lupuspatients convenience wrapper)
 
 ## `make_federated_mixture_gaussians`
 Defined in `noisyflow/data/synthetic.py`.
@@ -54,3 +56,24 @@ data:
     component_cov: 0.5
     seed: 0
 ```
+
+## `make_federated_cell_dataset`
+Defined in `noisyflow/data/cell.py`.
+
+This loader supports CellOT-style data with a source and target condition (e.g., `ctrl`→`stim`)
+and a client partition key (e.g., donor/patient id).
+
+Input formats:
+- `.h5ad`: reads `adata.X` and uses `adata.obs[label_key]`, `adata.obs[client_key]`, `adata.obs[condition_key]`
+  (requires `anndata` + `h5py`)
+- `.npz`: expects arrays: `X` (N,d), `label` (N,), `client` (N,), `condition` (N,)
+
+Key parameters:
+- `path`: dataset path
+- `label_key`, `client_key`, `condition_key`: metadata keys (for `.h5ad`)
+- `source_condition`, `target_condition`: condition values defining source/target
+- `split_mode`: `ood` (use `holdout_client`) or `iid`
+- `holdout_client`: client id reserved for target test split in `ood` mode
+- `target_ref_size`, `target_test_size`: optionally subsample target splits (int or fraction)
+- `max_clients`, `min_cells_per_client`: control the federated client list
+- `pca_dim`, `standardize`: optional global preprocessing (fit on source+target_ref)

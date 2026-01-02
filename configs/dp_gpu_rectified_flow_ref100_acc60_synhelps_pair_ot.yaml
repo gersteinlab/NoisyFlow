@@ -1,0 +1,128 @@
+seed: 0
+device: cuda
+
+# Non-private baseline for SW2 comparison.
+# This matches `dp_gpu_rectified_flow_ref100_acc60_synhelps.yaml`, but enables OT pairing via Hungarian matching.
+data:
+  type: federated_mixture_gaussians
+  params:
+    K: 3
+    n_per_client: 1500
+    n_target_ref: 2000
+    n_target_test: 1000
+    d: 50
+    num_classes: 6
+    component_scale: 0.45
+    component_cov: 1.15
+    seed: 0
+
+loaders:
+  batch_size: 256
+  target_batch_size: 256
+  test_batch_size: 512
+  synth_batch_size: 512
+  drop_last: true
+
+stage1:
+  epochs: 20
+  lr: 0.001
+  hidden: [128, 128]
+  time_emb_dim: 32
+  label_emb_dim: 32
+  label_prior:
+    enabled: true
+    mechanism: gaussian
+    sigma: 1.0
+  dp:
+    enabled: false
+    max_grad_norm: 1.0
+    noise_multiplier: 1.0
+    delta: 1e-5
+    grad_sample_mode: functorch
+
+stage2:
+  option: B
+  pair_by_label: true
+  pair_by_ot: true
+  epochs: 60
+  lr: 0.001
+  flow_steps: 50
+  dp:
+    enabled: false
+    max_grad_norm: 1.0
+    noise_multiplier: 1.0
+    delta: 1e-5
+    grad_sample_mode: functorch
+  cellot:
+    enabled: false
+  rectified_flow:
+    enabled: true
+    hidden: [256, 256]
+    time_emb_dim: 64
+    act: silu
+    transport_steps: 50
+
+stage3:
+  epochs: 30
+  lr: 0.001
+  hidden: [128, 128]
+  flow_steps: 50
+  M_per_client: 5000
+  ref_train_size: 100
+
+privacy_curve:
+  enabled: false
+  stage: stage1
+  noise_multipliers: [0.5, 1.0, 2.0, 4.0]
+  output_path: privacy_utility.png
+
+membership_inference:
+  enabled: false
+  max_samples: 2000
+  seed: 0
+
+shadow_mia:
+  enabled: false
+  num_shadow_models: 2
+  shadow_train_size: 2000
+  shadow_test_size: 2000
+  shadow_epochs: 5
+  shadow_lr: 0.001
+  shadow_hidden: [128, 128]
+  shadow_batch_size: 256
+  attack_epochs: 20
+  attack_lr: 0.001
+  attack_hidden: [64, 32]
+  attack_batch_size: 256
+  feature_set: stats
+  max_samples_per_shadow: 2000
+  seed: 0
+  data_overrides: {}
+
+stage_mia:
+  enabled: false
+  holdout_fraction: 0.2
+  num_flow_samples: 1
+  include_ot_transport_norm: true
+  attack_train_frac: 0.5
+  attack_hidden: [64, 32]
+  attack_epochs: 20
+  attack_lr: 0.001
+  attack_batch_size: 256
+  max_samples: 2000
+  seed: 0
+
+stage_shadow_mia:
+  enabled: false
+  num_shadow_models: 2
+  holdout_fraction: 0.2
+  num_flow_samples: 1
+  include_ot_transport_norm: true
+  attack_train_frac: 0.5
+  attack_hidden: [64, 32]
+  attack_epochs: 20
+  attack_lr: 0.001
+  attack_batch_size: 256
+  max_samples_per_shadow: 2000
+  seed: 0
+  data_overrides: {}
